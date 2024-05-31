@@ -29,9 +29,8 @@ enum client_state {
 enum tail_stream_mode_t {
     PLAYBACK,
     CAPTURE,
-    CAPTURE_PB
+	CAPTURE_PB
 };
-
 
 struct client_t {
     Socket sock;
@@ -45,6 +44,8 @@ struct client_t {
     int volume = 100;
     
     int capture_pb_id = 0;
+
+    bool drm = false;
 };
 
 struct tail_sound_convert_t {
@@ -143,9 +144,9 @@ void tail_client_resume(int id) {
 }
 
 void tail_client_close(int id) {
-    wait_pcm_mtx = true;
+    // wait_pcm_mtx = true;
     mgr_mtx.lock();
-    wait_pcm_mtx = false;
+    // wait_pcm_mtx = false;
 
     clients[id]->sock.close();
 
@@ -153,7 +154,6 @@ void tail_client_close(int id) {
     clients.erase(id);
 
     mgr_mtx.unlock();
-    
 }
 
 bool tail_check_all_pcm_not_running() {
@@ -168,23 +168,23 @@ size_t tail_snd_width_convert(const char* buf, char* dest, size_t size, int from
     return size;
 }
 
-size_t tail_snd_convert_channels(const char* buf, char* dest, size_t size, int inch, int outch) {
-    if (inch < outch && defaultWidth == 16) return convert_mono_to_stereo(buf, dest, size);
-    else if (inch < outch && defaultWidth == 32) return convert_mono_to_stereo32(buf, dest, size);
-    else if (inch > outch && defaultWidth == 16) return convert_stereo_to_mono(buf, dest, size);
-    else if (inch > outch && defaultWidth == 32) return convert_stereo_to_mono32(buf, dest, size);
+size_t tail_snd_convert_channels(const char* buf, char* dest, size_t size, int inch, int outch, int width) {
+    if (inch < outch && width == 16) return convert_mono_to_stereo(buf, dest, size);
+    else if (inch < outch && width == 32) return convert_mono_to_stereo32(buf, dest, size);
+    else if (inch > outch && width == 16) return convert_stereo_to_mono(buf, dest, size);
+    else if (inch > outch && width == 32) return convert_stereo_to_mono32(buf, dest, size);
     return size;
 }
 
-size_t tail_snd_resample_soxr(const char* buffer, char* dest, size_t size, double inputRate, double outputRate) {
+size_t tail_snd_resample_soxr(const char* buffer, char* dest, size_t size, double inputRate, double outputRate, int width) {
     if (inputRate == outputRate) return size;
 
-    size_t isamples = size / (defaultWidth / 8);
+    size_t isamples = size / (width / 8);
 
     double rateRatio = outputRate / inputRate;
     size_t osamples = lrint(isamples * rateRatio);
 
-    soxr_datatype_t spec = (defaultWidth == 32) ? SOXR_INT32_I : SOXR_INT16_I;
+    soxr_datatype_t spec = (width == 32) ? SOXR_INT32_I : SOXR_INT16_I;
     soxr_io_spec_t iospec = soxr_io_spec(spec, spec);
     soxr_quality_spec_t qualityspec = soxr_quality_spec(SOXR_MQ, 0);
 
@@ -232,8 +232,8 @@ size_t tail_snd_resample_libsamplerate(const char* buffer, char* dest, size_t si
     return data.output_frames_gen * sizeof(int16_t);
 }
 
-void tail_snd_volume_convert(const char* buffer, char* dest, size_t size, int volume) {
-    if (defaultWidth == 32) volume_convert32(buffer, dest, size, volume);
+void tail_snd_volume_convert(const char* buffer, char* dest, size_t size, int volume, int width) {
+    if (width == 32) volume_convert32(buffer, dest, size, volume);
     else volume_convert(buffer, dest, size, volume);
 }
 
@@ -255,14 +255,14 @@ size_t tail_snd_convert(tail_sound_convert_t data) {
     size_t snd_size = data.inSize;
 
     snd_size = tail_snd_width_convert(buffer, buffer, snd_size, data.inWidth, data.outWidth);
-    snd_size = tail_snd_convert_channels(buffer, buffer, snd_size, data.inChannels, data.outChannels);
+    snd_size = tail_snd_convert_channels(buffer, buffer, snd_size, data.inChannels, data.outChannels, data.outWidth);
 
     if (use_resample) {
-        if (LibSR && defaultWidth == 16) snd_size = tail_snd_resample_libsamplerate(buffer, buffer, snd_size, data.inRate, data.outRate);
-        else snd_size = tail_snd_resample_soxr(buffer, buffer, snd_size, data.inRate, data.outRate);
+        if (LibSR && data.outWidth == 16) snd_size = tail_snd_resample_libsamplerate(buffer, buffer, snd_size, data.inRate, data.outRate);
+        else snd_size = tail_snd_resample_soxr(buffer, buffer, snd_size, data.inRate, data.outRate, data.outWidth);
     }
 
-    tail_snd_volume_convert(buffer, buffer, snd_size, data.volume);
+    tail_snd_volume_convert(buffer, buffer, snd_size, data.volume, data.outWidth);
 
     memcpy(data.outbuf, buffer, snd_size);
 
@@ -426,9 +426,9 @@ void tail_pcm_io_capture() {
 }
 
 void tail_pcm_io_manager(Socket sock, Socket sockd, int client_id) {
-    wait_pcm_mtx = true;
+    // wait_pcm_mtx = true;
     mgr_mtx.lock();
-    wait_pcm_mtx = false;
+    // wait_pcm_mtx = false;
 
     client_t* client = new client_t;
     client->sock = sockd;
@@ -436,11 +436,21 @@ void tail_pcm_io_manager(Socket sock, Socket sockd, int client_id) {
     client->header = *((wav_header_t*)sock.recvmsg().buffer);
     client->mode = (tail_stream_mode_t)sock.recvbyte();
     client->volume = sock.recvbyte();
-
+    
     if (client->mode == CAPTURE_PB) {
         client->capture_pb_id = stoi(sock.recvmsg().string);
-        cout << "capture playback id: " << client->capture_pb_id << endl;
-    }
+
+        if (client->capture_pb_id && clients[client->capture_pb_id]->drm) {
+            delete client;
+            sock.sendmsg("Error: Unable capture DRM stream.");
+            sock.close();
+            sockd.close();
+
+            mgr_mtx.unlock();
+
+            return;
+        }
+    } else client->drm = sock.recvbyte();
 
     if (client->mode == PLAYBACK) {
         client->buffer_size = defaultBufferSize * ((float)client->header.bitsPerSample / defaultWidth) * ((float)client->header.numChannels / defaultChannels);
