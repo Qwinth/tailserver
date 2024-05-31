@@ -29,7 +29,7 @@ enum client_state {
 enum tail_stream_mode_t {
     PLAYBACK,
     CAPTURE,
-    CAPTURE_PB
+	CAPTURE_PB
 };
 
 struct client_t {
@@ -45,7 +45,7 @@ struct client_t {
     
     int capture_pb_id = 0;
 
-    bool drm = false;
+    bool drm_playback = false;
 };
 
 struct tail_sound_convert_t {
@@ -309,10 +309,12 @@ void tail_pcm_io_playback() {
     if (use_resample) client_buffer_size *= (384000.0f / defaultRate);
 
     char* mixed_buffer = new char[defaultBufferSize];
+    char* mixed_buffer_drm = new char[defaultBufferSize];
     char* client_playback_buffer = new char[client_buffer_size];
 
     while (!exit_flag) {
         memset(mixed_buffer, 0, defaultBufferSize);
+        memset(mixed_buffer_drm, 0, defaultBufferSize);
 
         if (!clients.empty() && !tail_check_all_pcm_not_running()) {
             mgr_mtx.lock();
@@ -353,8 +355,11 @@ void tail_pcm_io_playback() {
 
                     snd_size = tail_snd_convert(convdata);
 
-                    tail_pcm_io_capture_pb_callback(client_playback_buffer, snd_size, id);
-                    tail_snd_mix(mixed_buffer, client_playback_buffer, mixed_buffer, snd_size);
+                    if (client->drm_playback) tail_snd_mix(mixed_buffer_drm, client_playback_buffer, mixed_buffer_drm, snd_size);
+                    else {
+                        tail_pcm_io_capture_pb_callback(client_playback_buffer, snd_size, id);
+                        tail_snd_mix(mixed_buffer, client_playback_buffer, mixed_buffer, snd_size);
+                    }
                 }
             }
 
@@ -362,11 +367,14 @@ void tail_pcm_io_playback() {
         }
 
         tail_pcm_io_capture_pb_callback(mixed_buffer, defaultBufferSize, 0);
+
+        tail_snd_mix(mixed_buffer_drm, mixed_buffer, mixed_buffer, defaultBufferSize);
         
         try { pcm_playback.writei(mixed_buffer, defaultPeriod); } catch (int e) { tail_pcm_playback_reinit(); }
     }
 
     delete[] mixed_buffer;
+    delete[] mixed_buffer_drm;
     delete[] client_playback_buffer;
 
     pcm_playback.drop();
@@ -440,19 +448,21 @@ void tail_pcm_io_manager(Socket sock, Socket sockd, int client_id) {
     if (client->mode == CAPTURE_PB) {
         client->capture_pb_id = stoi(sock.recvmsg().string);
 
-        if (client->capture_pb_id && clients[client->capture_pb_id]->drm) {
-            delete client;
+        if (client->capture_pb_id && clients[client->capture_pb_id]->drm_playback) {
             sock.sendmsg("Error: Unable capture DRM stream.");
+
             sock.close();
             sockd.close();
 
             mgr_mtx.unlock();
 
+            delete client;
             return;
         }
-    } else client->drm = sock.recvbyte();
+    }
 
     if (client->mode == PLAYBACK) {
+        client->drm_playback = sock.recvbyte();
         client->buffer_size = defaultBufferSize * ((float)client->header.bitsPerSample / defaultWidth) * ((float)client->header.numChannels / defaultChannels);
         client->buffer.resize(client->buffer_size * 1024);
 
