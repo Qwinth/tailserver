@@ -156,8 +156,6 @@ void tail_client_close(int id) {
     
 }
 
-
-
 bool tail_check_all_pcm_not_running() {
     for (auto i : clients) if (i.second->state == RUNNING) return false;
     return true;
