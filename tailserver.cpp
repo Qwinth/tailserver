@@ -29,7 +29,7 @@ enum client_state {
 enum tail_stream_mode_t {
     PLAYBACK,
     CAPTURE,
-	CAPTURE_PB
+    CAPTURE_PB
 };
 
 struct client_t {
